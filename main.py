@@ -118,7 +118,7 @@ def progress(uid):
 
 def practice(uid,lang):
     u=user(uid); p=f'Создай одно короткое упражнение по {lname(lang)} для уровня {LEVELS[u["level"]]}. Не показывай ответ. Попроси ученика написать свой вариант.'
-    r=ai.generate_content(model=GEMINI_MODEL,contents=teacher_prompt(lang,u['level'])+'\n'+p,config=types.GenerateContentConfig(temperature=.5,max_output_tokens=500)); states[uid]=f'PRACTICE:{lang}'; bot.send_message(uid,r.text or 'Напиши простую фразу на изучаемом языке.')
+    r = ai.generate_content(model=GEMINI_MODEL,contents=teacher_prompt(lang,u['level'])+'\n'+p,config=types.GenerateContentConfig(temperature=.5,max_output_tokens=500)); states[uid]=f'PRACTICE:{lang}'; bot.send_message(uid,r.text or 'Напиши простую фразу на изучаемом языке.')
 
 def start_quiz(uid,lang):
     q=[('Как будет «спасибо»?',['你好','谢谢','再见','朋友'],1),('Что означает «你好»?',['спасибо','пока','привет','сколько'],2),('Как будет «я»?',['你','我','他','她'],1),('Что означает «哪里»?',['когда','почему','где','кто'],2)] if lang=='zh' else [('Как будет «спасибо»?',['안녕','감사합니다','친구','학교'],1),('Что означает «안녕하세요»?',['спасибо','здравствуйте','пока','сколько'],1),('Как будет «я» в вежливой форме?',['저','너','그','우리'],0),('Что означает «어디»?',['кто','где','почему','когда'],1)]
