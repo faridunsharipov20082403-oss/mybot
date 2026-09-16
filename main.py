@@ -85,7 +85,16 @@ def teacher_prompt(lang,lvl):
 def ask(uid,text,lang=None):
     u=user(uid); lang=lang or u['language']; key=(uid,lang); h=histories.setdefault(key,[]); h.append(('Ученик',text)); h[:]=h[-10:]
     context='\n'.join(f'{a}: {b}' for a,b in h)
-    r=ai.models.generate_content(model=GEMINI_MODEL,contents=teacher_prompt(lang,u['level'])+'\nУчебная сессия:\n'+context+'\nОтветь на последнее сообщение.',config=types.GenerateContentConfig(temperature=.6,max_output_tokens=900))
+    r = ai.models.generate_content(
+    model=GEMINI_MODEL,
+    contents=teacher_prompt(lang, u['level']) +
+             '\nУчебная сессия:\n' +
+             context +
+             '\nОтветь на последнее сообщение.',
+    config=types.GenerateContentConfig(
+        max_output_tokens=900
+    )
+    )
     ans=r.text or 'Не удалось получить ответ.'; h.append(('Учитель',ans)); return ans
 
 TOPICS={'zh':[('Приветствие','你好 / nǐ hǎo','привет'),('Спасибо','谢谢 / xièxie','спасибо'),('Меня зовут','我叫… / wǒ jiào…','меня зовут…'),('Я изучаю','我学习… / wǒ xuéxí…','я изучаю…'),('Где?','哪里 / nǎlǐ','где?')],'ko':[('Приветствие','안녕하세요 / annyeonghaseyo','здравствуйте'),('Спасибо','감사합니다 / gamsahamnida','спасибо'),('Меня зовут','제 이름은 …예요','меня зовут…'),('Я учусь','저는 공부해요','я учусь'),('Где?','어디예요?','где?')]}
