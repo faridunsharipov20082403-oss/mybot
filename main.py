@@ -35,7 +35,7 @@ def init_db():
         c.execute('''CREATE TABLE IF NOT EXISTS vocabulary(id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER,language TEXT,word TEXT,meaning TEXT DEFAULT '',pinyin TEXT DEFAULT '',example TEXT DEFAULT '',mastery INTEGER DEFAULT 0,next_review TEXT DEFAULT '',UNIQUE(user_id,language,word))''')
         c.execute('''CREATE TABLE IF NOT EXISTS mistakes(id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER,language TEXT,question TEXT,user_answer TEXT,correct_answer TEXT,explanation TEXT,created_at TEXT)''')
         c.commit(); c.close()
-        def user(uid):
+def user(uid):
     with lock:
         c=conn(); r=c.execute('SELECT * FROM users WHERE user_id=?',(uid,)).fetchone(); c.close()
     return dict(r)
