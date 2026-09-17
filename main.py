@@ -1,4 +1,4 @@
-import os, sqlite3, threading, random
+import os, sqlite3, threading, random, re, json
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from datetime import date, timedelta
 from google import genai
@@ -23,7 +23,7 @@ threading.Thread(target=run_http,daemon=True).start()
 
 bot=telebot.TeleBot(BOT_TOKEN,parse_mode='HTML')
 ai=genai.Client(api_key=GEMINI_API_KEY)
-lock=threading.Lock(); states={}; histories={}; quizzes={}
+lock=threading.Lock(); states={}; histories={}; quizzes={}; practice_tasks={}
 
 def conn():
     c=sqlite3.connect(DB_PATH,check_same_thread=False); c.row_factory=sqlite3.Row; return c
@@ -35,12 +35,7 @@ def init_db():
         c.execute('''CREATE TABLE IF NOT EXISTS vocabulary(id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER,language TEXT,word TEXT,meaning TEXT DEFAULT '',pinyin TEXT DEFAULT '',example TEXT DEFAULT '',mastery INTEGER DEFAULT 0,next_review TEXT DEFAULT '',UNIQUE(user_id,language,word))''')
         c.execute('''CREATE TABLE IF NOT EXISTS mistakes(id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER,language TEXT,question TEXT,user_answer TEXT,correct_answer TEXT,explanation TEXT,created_at TEXT)''')
         c.commit(); c.close()
-
-def ensure(uid,first='Ученик'):
-    with lock:
-        c=conn(); c.execute('INSERT OR IGNORE INTO users(user_id,first_name) VALUES(?,?)',(uid,first)); c.execute('UPDATE users SET first_name=? WHERE user_id=?',(first,uid)); c.commit(); c.close()
-
-def user(uid):
+        def user(uid):
     with lock:
         c=conn(); r=c.execute('SELECT * FROM users WHERE user_id=?',(uid,)).fetchone(); c.close()
     return dict(r)
@@ -70,7 +65,6 @@ def main_kb():
 
 def lang_kb():
     m=telebot.types.InlineKeyboardMarkup(); m.add(telebot.types.InlineKeyboardButton('🇨🇳 Китайский',callback_data='lang:zh'),telebot.types.InlineKeyboardButton('🇰🇷 Корейский',callback_data='lang:ko')); return m
-
 def lesson_kb(lang):
     m=telebot.types.InlineKeyboardMarkup(row_width=2)
     m.add(telebot.types.InlineKeyboardButton('📖 Урок',callback_data=f'lesson:{lang}'),telebot.types.InlineKeyboardButton('🗣 Практика',callback_data=f'practice:{lang}'))
@@ -81,25 +75,7 @@ def lname(lang): return 'китайского (中文 / Mandarin)' if lang=='zh'
 def teacher_prompt(lang,lvl):
     return f'''Ты — персональный AI-преподаватель {lname(lang)}. Ученик говорит по-русски. Уровень: {LEVELS[lvl]}.
 Веди ученика как настоящий терпеливый преподаватель: объясняй простыми словами, исправляй ошибки конкретно, задавай вопросы и упражнения, не раскрывай ответ до попытки ученика. Для китайского показывай иероглифы + pinyin + перевод и обращай внимание на тоны. Для корейского показывай корейское написание + при необходимости romanization + перевод и объясняй частицы, окончания и уровни вежливости. Используй русский для объяснений. Обычно одна небольшая тема за раз. Если ученик просит перевод — дай перевод и кратко объясни ключевые слова. Если он пишет фразу на изучаемом языке — оцени естественность и исправь её. Формат при необходимости: 📌 Тема / 📚 Объяснение / 🧩 Пример / ✍️ Твоё задание.'''
-
-def ask(uid,text,lang=None):
-    u=user(uid); lang=lang or u['language']; key=(uid,lang); h=histories.setdefault(key,[]); h.append(('Ученик',text)); h[:]=h[-10:]
-    context='\n'.join(f'{a}: {b}' for a,b in h)
-    r = ai.models.generate_content(
-    model=GEMINI_MODEL,
-    contents=teacher_prompt(lang, u['level']) +
-             '\nУчебная сессия:\n' +
-             context +
-             '\nОтветь на последнее сообщение.',
-    config=types.GenerateContentConfig(
-        max_output_tokens=900
-    )
-    )
-    ans=r.text or 'Не удалось получить ответ.'; h.append(('Учитель',ans)); return ans
-
-TOPICS={'zh':[('Приветствие','你好 / nǐ hǎo','привет'),('Спасибо','谢谢 / xièxie','спасибо'),('Меня зовут','我叫… / wǒ jiào…','меня зовут…'),('Я изучаю','我学习… / wǒ xuéxí…','я изучаю…'),('Где?','哪里 / nǎlǐ','где?')],'ko':[('Приветствие','안녕하세요 / annyeonghaseyo','здравствуйте'),('Спасибо','감사합니다 / gamsahamnida','спасибо'),('Меня зовут','제 이름은 …예요','меня зовут…'),('Я учусь','저는 공부해요','я учусь'),('Где?','어디예요?','где?')]}
-
-def lesson(uid,lang):
+    def lesson(uid,lang):
     topic,phrase,meaning=random.choice(TOPICS[lang]); streak=study(uid); add_xp(uid,20)
     bot.send_message(uid,f'📚 <b>Мини-урок: {topic}</b>\n\n<b>{phrase}</b>\n🇷🇺 {meaning}\n\n💡 Попробуй написать фразу самостоятельно.\n🔥 Серия: {streak} дн.\n⭐ +20 XP',reply_markup=lesson_kb(lang))
 
@@ -115,16 +91,25 @@ def progress(uid):
         c=conn(); vc=c.execute('SELECT COUNT(*) FROM vocabulary WHERE user_id=?',(uid,)).fetchone()[0]; mc=c.execute('SELECT COUNT(*) FROM mistakes WHERE user_id=?',(uid,)).fetchone()[0]; c.close()
     acc=round(u['total_correct']/u['total_answers']*100) if u['total_answers'] else 0
     bot.send_message(uid,f"📊 <b>Прогресс</b>\n\n🌐 {lname(u['language'])}\n🎓 {LEVELS[u['level']]}\n⭐ XP: <b>{u['xp']}</b>\n🔥 Серия: <b>{u['streak']} дн.</b>\n📚 Уроков: <b>{u['total_lessons']}</b>\n📝 Слов: <b>{vc}</b>\n❌ Ошибок: <b>{mc}</b>\n🎯 Точность тестов: <b>{acc}%</b>")
-
-def practice(uid,lang):
-    u=user(uid); p=f'Создай одно короткое упражнение по {lname(lang)} для уровня {LEVELS[u["level"]]}. Не показывай ответ. Попроси ученика написать свой вариант.'
-    r = ai.models.generate_content(model=GEMINI_MODEL,contents=teacher_prompt(lang,u['level'])+'\n'+p,config=types.GenerateContentConfig(temperature=.5,max_output_tokens=500)); states[uid]=f'PRACTICE:{lang}'; bot.send_message(uid,r.text or 'Напиши простую фразу на изучаемом языке.')
+    def practice(uid,lang):
+    u=user(uid)
+    prompt=f"""Ты — преподаватель {lname(lang)}. Уровень ученика: {LEVELS[u['level']]}.
+Создай ОДНО короткое упражнение, подходящее именно этому уровню.
+Правила:
+- не показывай ответ;
+- тема должна быть практичной;
+- для китайского используй иероглифы + pinyin только там, где это помогает;
+- для корейского используй корейский текст + romanization при необходимости;
+- в конце попроси ученика написать свой вариант.
+Ответ только для ученика, без служебных комментариев."""
+    ans=generate_ai(teacher_prompt(lang,u['level'])+'\n'+prompt,600)
+    states[uid]=f'PRACTICE:{lang}'
+    practice_tasks[uid]=ans
+    bot.send_message(uid,'🧠 <b>Тренировка</b>\n\n'+ans)
 
 def start_quiz(uid,lang):
     q=[('Как будет «спасибо»?',['你好','谢谢','再见','朋友'],1),('Что означает «你好»?',['спасибо','пока','привет','сколько'],2),('Как будет «я»?',['你','我','他','她'],1),('Что означает «哪里»?',['когда','почему','где','кто'],2)] if lang=='zh' else [('Как будет «спасибо»?',['안녕','감사합니다','친구','학교'],1),('Что означает «안녕하세요»?',['спасибо','здравствуйте','пока','сколько'],1),('Как будет «я» в вежливой форме?',['저','너','그','우리'],0),('Что означает «어디»?',['кто','где','почему','когда'],1)]
-    quizzes[uid]={'questions':q,'i':0,'score':0}; send_q(uid)
-
-def send_q(uid):
+    def send_q(uid):
     s=quizzes.get(uid)
     if not s:return
     if s['i']>=len(s['questions']):
@@ -145,7 +130,10 @@ def choose(m):
 @bot.message_handler(func=lambda m:m.text=='📚 Урок')
 def lm(m): ensure(m.chat.id); lang=user(m.chat.id)['language']; bot.send_message(m.chat.id,'📚 <b>Учебный центр</b>',reply_markup=lesson_kb(lang))
 @bot.message_handler(func=lambda m:m.text=='🧠 Тренировка')
-def pm(m): ensure(m.chat.id); practice(m.chat.id,user(m.chat.id)['language'])
+def pm(m):
+    ensure(m.chat.id)
+    try: practice(m.chat.id,user(m.chat.id)['language'])
+    except Exception as e: print('practice:',repr(e),flush=True); bot.send_message(m.chat.id,'⚠️ Не удалось создать упражнение. Попробуй ещё раз.')
 @bot.message_handler(func=lambda m:m.text=='📝 Словарь')
 def wm(m): ensure(m.chat.id); words(m.chat.id,user(m.chat.id)['language'])
 @bot.message_handler(func=lambda m:m.text=='📊 Прогресс')
@@ -159,14 +147,16 @@ def am(m):
 def sm(m): ensure(m.chat.id); bot.send_message(m.chat.id,'⚙️ Выбери основной язык:',reply_markup=lang_kb())
 @bot.message_handler(func=lambda m:m.text=='ℹ️ Помощь')
 def hm(m): ensure(m.chat.id); bot.send_message(m.chat.id,'ℹ️ <b>Как заниматься</b>\n\n1. Каждый день проходи урок.\n2. Делай тренировку.\n3. Проверяй себя тестом.\n4. Включай AI-учителя для свободного общения и исправления ошибок.\n5. Следи за XP и серией.',reply_markup=main_kb())
-
-@bot.callback_query_handler(func=lambda c:c.data.startswith('lang:'))
+    @bot.callback_query_handler(func=lambda c:c.data.startswith('lang:'))
 def cb_lang(c):
     lang=c.data.split(':')[1]; update(c.message.chat.id,language=lang); states[c.message.chat.id]=None; bot.answer_callback_query(c.id,'Сохранено'); bot.send_message(c.message.chat.id,f'✅ Основной язык: {lname(lang)}',reply_markup=main_kb())
 @bot.callback_query_handler(func=lambda c:c.data.startswith('lesson:'))
 def cb_l(c): bot.answer_callback_query(c.id); lesson(c.message.chat.id,c.data.split(':')[1])
 @bot.callback_query_handler(func=lambda c:c.data.startswith('practice:'))
-def cb_p(c): bot.answer_callback_query(c.id); practice(c.message.chat.id,c.data.split(':')[1])
+def cb_p(c):
+    bot.answer_callback_query(c.id)
+    try: practice(c.message.chat.id,c.data.split(':')[1])
+    except Exception as e: print('practice:',repr(e),flush=True); bot.send_message(c.message.chat.id,'⚠️ Не удалось создать упражнение. Попробуй ещё раз.')
 @bot.callback_query_handler(func=lambda c:c.data.startswith('words:'))
 def cb_w(c): bot.answer_callback_query(c.id); words(c.message.chat.id,c.data.split(':')[1])
 @bot.callback_query_handler(func=lambda c:c.data.startswith('grammar:'))
@@ -184,7 +174,11 @@ def cb_a(c):
     if selected==correct: s['score']+=1; bot.answer_callback_query(c.id,'✅ Правильно!'); bot.send_message(uid,'✅ Правильно!')
     else: bot.answer_callback_query(c.id,'❌ Ошибка'); bot.send_message(uid,f'❌ Правильный ответ: <b>{opts[correct]}</b>')
     s['i']+=1; send_q(uid)
-
+    @bot.message_handler(commands=['exit','stop'])
+def exit_ai(m):
+    ensure(m.chat.id)
+    states[m.chat.id]=None
+    bot.send_message(m.chat.id,'✅ Режим ИИ/тренировки выключен. Выбери раздел ниже 👇',reply_markup=main_kb())
 @bot.message_handler(content_types=['text'])
 def text(m):
     uid=m.chat.id; ensure(uid,m.from_user.first_name or 'Ученик'); t=(m.text or '').strip(); state=states.get(uid)
@@ -192,19 +186,41 @@ def text(m):
         lang=state.split(':')[1]
         try:
             bot.send_chat_action(uid,'typing')
-            if state.startswith('PRACTICE:'): prompt=f'Ученик выполняет упражнение. Его ответ: {t}. Проверь как преподаватель: правильно/неправильно, исправление, короткое объяснение и одно следующее задание.'
-            else: prompt=t
-            bot.send_message(uid,ask(uid,prompt,lang))
-        except Exception as e: print('AI:',repr(e)); bot.send_message(uid,'⚠️ Ошибка AI. Проверь GEMINI_API_KEY и попробуй снова.')
+            if state.startswith('PRACTICE:'):
+                task=practice_tasks.get(uid,'(упражнение не сохранилось; оцени ответ по контексту уровня)')
+                prompt=f"""Ты проверяешь ответ ученика.
+Последнее упражнение было:
+{task}
+
+Ответ ученика:
+{t}
+
+Сделай кратко:
+1) Скажи: ✅ правильно или ❌ есть ошибка.
+2) Если ошибка — дай правильный вариант.
+3) Объясни ошибку по-русски в 1–2 предложениях.
+4) Дай ОДНО новое короткое упражнение без ответа.
+Если ответ допустим, не придирайся к мелким стилистическим различиям."""
+                ans=generate_ai(teacher_prompt(lang,user(uid)['level'])+'\n'+prompt,650)
+                bot.send_message(uid,ans)
+                add_xp(uid,10)
+                practice_tasks.pop(uid,None)
+            else:
+                bot.send_message(uid,ask(uid,t,lang))
+        except Exception as e:
+            print('AI:',repr(e),flush=True)
+            bot.send_message(uid,'⚠️ AI временно не ответил. Попробуй ещё раз через несколько секунд.')
         return
     u=user(uid); low=t.lower()
     if any(x in low for x in ['китай','китайский','корей','корейский','иероглиф','граммат','переведи','перевод','упражнен','объясни']):
         states[uid]=f'AI:{u["language"]}'
         try: bot.send_message(uid,ask(uid,t,u['language']))
-        except Exception as e: print('auto:',repr(e)); bot.send_message(uid,'⚠️ Ошибка AI.')
+        except Exception as e: print('auto:',repr(e),flush=True); bot.send_message(uid,'⚠️ AI временно не ответил. Попробуй ещё раз.')
         return
     bot.send_message(uid,'Выбери раздел ниже 👇',reply_markup=main_kb())
 
 if __name__=='__main__':
     init_db(); print('Language Teacher started:',GEMINI_MODEL); bot.infinity_polling(skip_pending=True,timeout=60,long_polling_timeout=60)
-
+            
+    quizzes[uid]={'questions':q,'i':0,'score':0}; send_q(uid)
+    
